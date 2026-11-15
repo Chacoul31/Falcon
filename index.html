@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bibliothèque</title>
+<style>
+:root{
+  --bg:#f6f4ef; --card:#ffffff; --text:#1d1b18; --muted:#7a746a; --accent:#1f6f54; --accent-d:#17543f; --line:#e4dfd5; --shadow:0 6px 18px rgba(0,0,0,.12);
+}
+@media (prefers-color-scheme:dark){
+  :root{--bg:#14161a; --card:#1e2127; --text:#ece8df; --muted:#9a958a; --accent:#3fb68b; --accent-d:#2f9370; --line:#2c3038; --shadow:0 6px 18px rgba(0,0,0,.5);}
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+header{padding:28px 16px 8px;text-align:center}
+header h1{font-size:1.9rem;letter-spacing:.3px}
+header p{color:var(--muted);margin-top:6px;font-size:.95rem}
+.bar{max-width:1100px;margin:18px auto 6px;padding:0 16px;display:flex;gap:10px;flex-wrap:wrap}
+.bar input,.bar select{padding:11px 14px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--text);font-size:1rem}
+.bar input{flex:1 1 220px}
+.count{max-width:1100px;margin:6px auto 0;padding:0 16px;color:var(--muted);font-size:.85rem}
+main{max-width:1100px;margin:0 auto;padding:16px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(165px,1fr));gap:22px}
+.book{background:var(--card);border-radius:12px;overflow:hidden;box-shadow:var(--shadow);display:flex;flex-direction:column;transition:transform .15s}
+.book:hover{transform:translateY(-3px)}
+.cover{position:relative;aspect-ratio:2/3;background:var(--line);overflow:hidden}
+.cover img{width:100%;height:100%;object-fit:cover;display:block}
+.cover .ph{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:14px;color:#fff;font-weight:700;font-size:1rem;line-height:1.25;word-break:break-word}
+.badge{position:absolute;top:8px;right:8px;background:rgba(0,0,0,.65);color:#fff;font-size:.7rem;padding:3px 7px;border-radius:6px;letter-spacing:.5px}
+.info{padding:10px 12px 12px;display:flex;flex-direction:column;gap:8px;flex:1}
+.title{font-size:.9rem;font-weight:600;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.meta{font-size:.75rem;color:var(--muted)}
+.actions{display:flex;gap:6px;margin-top:auto}
+.btn{flex:1;text-align:center;text-decoration:none;font-size:.82rem;padding:8px 6px;border-radius:8px;border:1px solid var(--accent);color:var(--accent);font-weight:600}
+.btn.main{background:var(--accent);color:#fff}
+.btn.main:hover{background:var(--accent-d)}
+.btn:not(.main):hover{background:var(--line)}
+.empty{text-align:center;color:var(--muted);padding:60px 16px;line-height:1.7}
+.empty code{background:var(--line);padding:2px 6px;border-radius:5px}
+footer{text-align:center;color:var(--muted);font-size:.8rem;padding:24px 16px 32px}
+</style>
+</head>
+<body>
+<header>
+  <h1>📚 Ma Bibliothèque</h1>
+  <p>Choisissez un livre et téléchargez-le gratuitement</p>
+</header>
+
+<div class="bar">
+  <input id="q" type="search" placeholder="Rechercher un livre…" autocomplete="off">
+  <select id="fmt" aria-label="Format"><option value="">Tous les formats</option></select>
+  <select id="sort" aria-label="Tri">
+    <option value="az">Titre A → Z</option>
+    <option value="za">Titre Z → A</option>
+    <option value="new">Ordre d'ajout</option>
+  </select>
+</div>
+<div class="count" id="count"></div>
+
+<main>
+  <div class="grid" id="grid"></div>
+  <div class="empty" id="empty" hidden></div>
+</main>
+<footer>Déposez vos livres dans le dossier <b>Books</b> du dépôt GitHub — ils apparaissent ici automatiquement.</footer>
+
+<script>
+(function(){
+  'use strict';
+
+  var BOOKS_DIR = 'Books';
+  var EXT = ['pdf','epub','mobi','azw3','txt','docx','doc','djvu','cbz'];
+  var PDFJS_JS = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+  var PDFJS_WORKER = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+  var grid = document.getElementById('grid');
+  var emptyBox = document.getElementById('empty');
+  var countEl = document.getElementById('count');
+  var qEl = document.getElementById('q');
+  var fmtEl = document.getElementById('fmt');
+  var sortEl = document.getElementById('sort');
+
+  var books = [];
+  var coverCache = {};
+  var queue = Promise.resolve();
+
+  /* ---------- Détection du dépôt GitHub ---------- */
+  function detectRepo(){
+    var p = new URLSearchParams(location.search).get('repo');
+    if (p && p.indexOf('/') > 0) { var a = p.split('/'); return {owner:a[0], repo:a[1]}; }
+    var host = location.hostname;
+    if (/\.github\.io$/i.test(host)) {
+      var owner = host.split('.')[0];
+      var seg = location.pathname.split('/').filter(Boolean)[0];
+      var repo = (seg && seg.indexOf('.') === -1) ? seg : (owner + '.github.io');
+      return {owner:owner, repo:repo};
+    }
+    return null;
+  }
+
+  /* ---------- Chargement de la liste des livres ---------- */
+  function extOf(n){ var m = /\.([a-z0-9]+)$/i.exec(n); return m ? m[1].toLowerCase() : ''; }
+
+  function fromApi(){
+    var r = detectRepo();
+    if (!r) return Promise.reject(new Error('no repo'));
+    var url = 'https://api.github.com/repos/' + r.owner + '/' + r.repo + '/contents/' + BOOKS_DIR;
+    return fetch(url, {headers:{'Accept':'application/vnd.github+json'}}).then(function(res){
+      if (!res.ok) throw new Error('api ' + res.status);
+      return res.json();
+    }).then(function(list){
+      return list.filter(function(f){ return f.type === 'file'; })
+                 .map(function(f){ return {name:f.name, size:f.size}; });
+    });
+  }
+
+  function fromManifest(){
+    return fetch('books.json', {cache:'no-cache'}).then(function(res){
+      if (!res.ok) throw new Error('manifest ' + res.status);
+      return res.json();
+    }).then(function(list){
+      return list.map(function(x){
+        return (typeof x === 'string') ? {name:x, size:0} : {name:x.name, size:x.size || 0};
+      });
+    });
+  }
+
+  function load(){
+    return fromApi().catch(function(){ return fromManifest(); }).catch(function(){ return []; });
+  }
+
+  /* ---------- Utilitaires ---------- */
+  function prettyTitle(name){
+    return name.replace(/\.[^.]+$/, '').replace(/[_]+/g, ' ').replace(/\s*-\s*/g, ' – ').replace(/\s+/g, ' ').trim();
+  }
+  function fmtSize(b){
+    if (!b) return '';
+    if (b < 1024*1024) return Math.max(1, Math.round(b/1024)) + ' Ko';
+    return (b/1024/1024).toFixed(1).replace('.', ',') + ' Mo';
+  }
+  function hue(s){ var h = 0; for (var i = 0; i < s.length; i++) h = (h*31 + s.charCodeAt(i)) % 360; return h; }
+  function bookUrl(name){ return BOOKS_DIR + '/' + encodeURIComponent(name); }
+
+  /* ---------- Couverture PDF (1ère page) ---------- */
+  var pdfReady = null;
+  function loadPdfJs(){
+    if (pdfReady) return pdfReady;
+    pdfReady = new Promise(function(resolve, reject){
+      if (window.pdfjsLib) { resolve(window.pdfjsLib); return; }
+      var s = document.createElement('script');
+      s.src = PDFJS_JS;
+      s.onload = function(){
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER;
+        resolve(window.pdfjsLib);
+      };
+      s.onerror = function(){ reject(new Error('pdfjs')); };
+      document.head.appendChild(s);
+    });
+    return pdfReady;
+  }
+
+  function coverFromPdf(name){
+    return loadPdfJs().then(function(lib){
+      return lib.getDocument({url: bookUrl(name)}).promise;
+    }).then(function(doc){
+      return doc.getPage(1).then(function(page){
+        var v1 = page.getViewport({scale:1});
+        var scale = 420 / v1.width;
+        var vp = page.getViewport({scale:scale});
+        var c = document.createElement('canvas');
+        c.width = Math.floor(vp.width);
+        c.height = Math.floor(vp.height);
+        var ctx = c.getContext('2d');
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, c.width, c.height);
+        return page.render({canvasContext:ctx, viewport:vp}).promise.then(function(){
+          var url = c.toDataURL('image/jpeg', 0.82);
+          doc.destroy();
+          return url;
+        });
+      });
+    });
+  }
+
+  /* ---------- Couverture EPUB (lecteur ZIP minimal) ---------- */
+  function readZipEntry(buf, name){
+    var dv = new DataView(buf);
+    var eocd = -1;
+    var min = Math.max(0, buf.byteLength - 65557);
+    for (var i = buf.byteLength - 22; i >= min; i--) {
+      if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+    }
+    if (eocd < 0) return Promise.resolve(null);
+    var count = dv.getUint16(eocd + 10, true);
+    var p = dv.getUint32(eocd + 16, true);
+    var dec = new TextDecoder();
+    for (var n = 0; n < count; n++) {
+      if (dv.getUint32(p, true) !== 0x02014b50) break;
+      var method = dv.getUint16(p + 10, true);
+      var csize = dv.getUint32(p + 20, true);
+      var nlen = dv.getUint16(p + 28, true);
+      var elen = dv.getUint16(p + 30, true);
+      var clen = dv.getUint16(p + 32, true);
+      var off = dv.getUint32(p + 42, true);
+      var fname = dec.decode(new Uint8Array(buf, p + 46, nlen));
+      if (fname === name) {
+        var lnlen = dv.getUint16(off + 26, true);
+        var lelen = dv.getUint16(off + 28, true);
+        var start = off + 30 + lnlen + lelen;
+        var data = new Uint8Array(buf, start, csize);
+        if (method === 0) return Promise.resolve(data);
+        if (typeof DecompressionStream === 'undefined') return Promise.resolve(null);
+        var stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+        return new Response(stream).arrayBuffer().then(function(ab){ return new Uint8Array(ab); });
+      }
+      p += 46 + nlen + elen + clen;
+    }
+    return Promise.resolve(null);
+  }
+
+  function resolvePath(base, rel){
+    rel = decodeURIComponent(rel.split('#')[0]);
+    var parts = (base ? base.split('/') : []).concat(rel.split('/'));
+    var out = [];
+    parts.forEach(function(s){
+      if (s === '..') out.pop();
+      else if (s && s !== '.') out.push(s);
+    });
+    return out.join('/');
+  }
+
+  function coverFromEpub(name){
+    var dec = new TextDecoder();
+    var buf;
+    return fetch(bookUrl(name)).then(function(r){
+      if (!r.ok) throw new Error('fetch');
+      return r.arrayBuffer();
+    }).then(function(b){
+      buf = b;
+      return readZipEntry(buf, 'META-INF/container.xml');
+    }).then(function(cx){
+      if (!cx) throw new Error('container');
+      var doc = new DOMParser().parseFromString(dec.decode(cx), 'application/xml');
+      var rf = doc.querySelector('rootfile');
+      var opfPath = rf && rf.getAttribute('full-path');
+      if (!opfPath) throw new Error('opf');
+      return readZipEntry(buf, opfPath).then(function(ox){
+        if (!ox) throw new Error('opf data');
+        var opf = new DOMParser().parseFromString(dec.decode(ox), 'application/xml');
+        var dir = opfPath.indexOf('/') >= 0 ? opfPath.substring(0, opfPath.lastIndexOf('/')) : '';
+        var items = Array.prototype.slice.call(opf.getElementsByTagName('item'));
+        var href = null, mime = 'image/jpeg';
+        var byProp = items.filter(function(i){ return (i.getAttribute('properties') || '').split(' ').indexOf('cover-image') >= 0; })[0];
+        if (!byProp) {
+          var metas = Array.prototype.slice.call(opf.getElementsByTagName('meta'));
+          var cm = metas.filter(function(m){ return m.getAttribute('name') === 'cover'; })[0];
+          if (cm) {
+            var cid = cm.getAttribute('content');
+            byProp = items.filter(function(i){ return i.getAttribute('id') === cid; })[0];
+          }
+        }
+        if (!byProp) {
+          byProp = items.filter(function(i){
+            return /image\//.test(i.getAttribute('media-type') || '') && /cover/i.test(i.getAttribute('href') || '');
+          })[0];
+        }
+        if (!byProp) throw new Error('no cover');
+        href = byProp.getAttribute('href');
+        mime = byProp.getAttribute('media-type') || mime;
+        return readZipEntry(buf, resolvePath(dir, href)).then(function(img){
+          if (!img) throw new Error('img');
+          return URL.createObjectURL(new Blob([img], {type:mime}));
+        });
+      });
+    });
+  }
+
+  function getCover(b){
+    if (coverCache[b.name] !== undefined) return Promise.resolve(coverCache[b.name]);
+    var ext = extOf(b.name);
+    var p;
+    if (ext === 'pdf') p = coverFromPdf(b.name);
+    else if (ext === 'epub') p = coverFromEpub(b.name);
+    else p = Promise.resolve(null);
+    return p.catch(function(){ return null; }).then(function(u){ coverCache[b.name] = u; return u; });
+  }
+
+  /* ---------- Rendu ---------- */
+  var io = ('IntersectionObserver' in window) ? new IntersectionObserver(function(entries){
+    entries.forEach(function(e){
+      if (!e.isIntersecting) return;
+      io.unobserve(e.target);
+      var el = e.target;
+      var b = el._book;
+      queue = queue.then(function(){
+        return getCover(b).then(function(url){
+          if (!url) return;
+          var img = new Image();
+          img.alt = 'Couverture de ' + b.title;
+          img.onload = function(){
+            var ph = el.querySelector('.ph');
+            if (ph) ph.remove();
+            el.insertBefore(img, el.firstChild);
+          };
+          img.src = url;
+        });
+      });
+    });
+  }, {rootMargin:'200px'}) : null;
+
+  function card(b){
+    var art = document.createElement('article');
+    art.className = 'book';
+
+    var cover = document.createElement('div');
+    cover.className = 'cover';
+    cover._book = b;
+    var ph = document.createElement('div');
+    ph.className = 'ph';
+    var h = hue(b.name);
+    ph.style.background = 'linear-gradient(145deg, hsl(' + h + ',45%,38%), hsl(' + ((h + 40) % 360) + ',50%,26%))';
+    ph.textContent = b.title;
+    cover.appendChild(ph);
+    var badge = document.createElement('span');
+    badge.className = 'badge';
+    badge.textContent = b.ext.toUpperCase();
+    cover.appendChild(badge);
+    art.appendChild(cover);
+
+    var info = document.createElement('div');
+    info.className = 'info';
+    var t = document.createElement('div');
+    t.className = 'title';
+    t.textContent = b.title;
+    t.title = b.title;
+    info.appendChild(t);
+    var m = document.createElement('div');
+    m.className = 'meta';
+    m.textContent = fmtSize(b.size);
+    info.appendChild(m);
+
+    var act = document.createElement('div');
+    act.className = 'actions';
+    var dl = document.createElement('a');
+    dl.className = 'btn main';
+    dl.href = bookUrl(b.name);
+    dl.setAttribute('download', b.name);
+    dl.textContent = 'Télécharger';
+    act.appendChild(dl);
+    if (b.ext === 'pdf') {
+      var op = document.createElement('a');
+      op.className = 'btn';
+      op.href = bookUrl(b.name);
+      op.target = '_blank';
+      op.rel = 'noopener';
+      op.textContent = 'Lire';
+      act.appendChild(op);
+    }
+    info.appendChild(act);
+    art.appendChild(info);
+
+    if (io) io.observe(cover);
+    else queue = queue.then(function(){ return getCover(b); });
+    return art;
+  }
+
+  function render(){
+    var q = qEl.value.trim().toLowerCase();
+    var f = fmtEl.value;
+    var list = books.filter(function(b){
+      return (!f || b.ext === f) && (!q || b.title.toLowerCase().indexOf(q) >= 0);
+    });
+    var s = sortEl.value;
+    if (s === 'az') list.sort(function(a, b){ return a.title.localeCompare(b.title, 'fr', {sensitivity:'base'}); });
+    else if (s === 'za') list.sort(function(a, b){ return b.title.localeCompare(a.title, 'fr', {sensitivity:'base'}); });
+    else list.sort(function(a, b){ return a.idx - b.idx; });
+
+    grid.textContent = '';
+    list.forEach(function(b){ grid.appendChild(card(b)); });
+    countEl.textContent = books.length ? (list.length + ' livre' + (list.length > 1 ? 's' : '') + ' affiché' + (list.length > 1 ? 's' : '')) : '';
+    emptyBox.hidden = list.length > 0;
+    if (!list.length) {
+      emptyBox.innerHTML = books.length
+        ? 'Aucun livre ne correspond à votre recherche.'
+        : 'Aucun livre trouvé pour le moment.<br>Déposez vos fichiers (<code>.pdf</code>, <code>.epub</code>…) dans le dossier <code>Books</code> de votre dépôt GitHub.';
+    }
+  }
+
+  function init(){
+    load().then(function(list){
+      books = list.filter(function(f){ return EXT.indexOf(extOf(f.name)) >= 0; }).map(function(f, i){
+        return {name:f.name, size:f.size, ext:extOf(f.name), title:prettyTitle(f.name), idx:i};
+      });
+      var seen = {};
+      books.forEach(function(b){
+        if (!seen[b.ext]) {
+          seen[b.ext] = 1;
+          var o = document.createElement('option');
+          o.value = b.ext;
+          o.textContent = b.ext.toUpperCase();
+          fmtEl.appendChild(o);
+        }
+      });
+      render();
+    });
+  }
+
+  qEl.addEventListener('input', render);
+  fmtEl.addEventListener('change', render);
+  sortEl.addEventListener('change', render);
+  init();
+})();
+</script>
+</body>
+</html>
